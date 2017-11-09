@@ -12,10 +12,17 @@ Function set-ADUG-CertIssOID {
 # The group name must resolve uniquely and is created as a Universal Security Group, 
 # then the OID object is configured for the Authentication Mechanisim Assurance link.
 # 
-# This function may be invoked multiple times for the same OID, Name pair. 
-# The objects are not recreated but critical setting are repeated so this can be used to repair broken linkages
+# This function may be invoked multiple times for the same OID, Name pair. The objects are not recreated but critical setting are 
+# repeated so this can be used to repair broken linkages.
 #
-# set-ADUG-CertIssOID 2.16.840.1.101.3.2.1.48.11 csor-test-fpki-common-authentication
+# This script has a list of policy OIDs that will be loaded. 
+# You should verify that the policy is applicable to your implementation.
+# 
+# An example is below.
+# set-ADUG-CertIssOID 2.16.840.1.101.3.2.1.3.13 id-fpki-common-authentication
+#
+# You may have to change the powershell script execution policy to execute this script or 
+# sign the script to execute it after downloading.
 
   begin {
      # Assumption:  The group to which the Issuance Policy is going 
