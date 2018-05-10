@@ -5,7 +5,9 @@ Function set-ADUG-CertIssOID {
 # Modified by Tim Baldridge, 30 August 2015 - Changed Function Name
 #
 # This script will create, if it does not already exist, a Universal Group of name $IssuancePolicyName at the 
-# path OU=Groups,OU=Administrators, <domain>, the <domain> is dynamically determined domain components of the form DC=xyx, DC=mil, etc..
+# path OU=Groups, <group OU>, <domain>. 
+# You will have to specify the group OU value in $groupOU variable in the script below. e.g. OU=Administrators. 
+# The <domain> is dynamically determined domain components of the form DC=xyx, DC=mil, etc.
 #
 # It will also create the OID object, if it does not exist, and set the OID object name attributes not set by certutil.
 #
@@ -32,8 +34,9 @@ Function set-ADUG-CertIssOID {
      $root = get-adrootdse
      $domain = get-addomain -current loggedonuser
      $searchBase = [String]$root.configurationnamingcontext
+     $groupOU = "<set your OU for groups>"
 
-     $Path = "OU=Groups,OU=Administrators,$domain"
+     $Path = "OU=Groups,$groupOU,$domain"
      $Description = "AD Authentication Mechanism Assurance"
 
      $AdminOUpath = Get-ADOrganizationalUnit -Filter 'Name -like "Administrators"' -SearchBase $domain -SearchScope 1
