@@ -1,13 +1,11 @@
-Function set-ADUG-CertIssOID {
-  param($IssuancePolicyOID, $IssuancePolicyName)
-
+# Authentication Assurance (AMA) Script
+# ======================================
 # Written by Tim Baldridge, 8 June 2012
 # Modified by Tim Baldridge, 30 August 2015 - Changed Function Name
+# Modified by Indrajit Ghosh, 11 May 2018 - Updated policy OIDs, removed group OU creation and parameterized OU as input.
 #
 # This script will create, if it does not already exist, a Universal Group of name $IssuancePolicyName at the 
-# path OU=Groups, <group OU>, <domain>. 
-# You will have to specify the group OU value in $groupOU variable in the script below. e.g. OU=Administrators. 
-# The <domain> is dynamically determined domain components of the form DC=xyx, DC=mil, etc.
+# path <GroupDN>. You will have to specify the Group DN value as input. e.g. ou=groups,ou=security,dc=agency,dc=gov. 
 #
 # It will also create the OID object, if it does not exist, and set the OID object name attributes not set by certutil.
 #
@@ -21,10 +19,17 @@ Function set-ADUG-CertIssOID {
 # You should verify that the policy is applicable to your implementation.
 # 
 # An example is below.
-# set-ADUG-CertIssOID 2.16.840.1.101.3.2.1.3.13 id-fpki-common-authentication
+# set-ADUG-CertIssOID 2.16.840.1.101.3.2.1.3.13 id-fpki-common-authentication $GroupDN
 #
 # You may have to change the powershell script execution policy to execute this script or 
 # sign the script to execute it after downloading.
+
+param ( [Parameter(Mandatory=$True)][string]$GroupDN)
+Write "=============================================="
+Write "Group DN entered is $GroupDN."
+
+Function set-ADUG-CertIssOID {
+  param($IssuancePolicyOID, $IssuancePolicyName, $GroupDN)
 
   begin {
      # Assumption:  The group to which the Issuance Policy is going 
@@ -34,25 +39,15 @@ Function set-ADUG-CertIssOID {
      $root = get-adrootdse
      $domain = get-addomain -current loggedonuser
      $searchBase = [String]$root.configurationnamingcontext
-     $groupOU = "<set your OU for groups>"
-
-     $Path = "OU=Groups,$groupOU,$domain"
+     
+     $Path = $GroupDN
      $Description = "AD Authentication Mechanism Assurance"
 
-     $AdminOUpath = Get-ADOrganizationalUnit -Filter 'Name -like "Administrators"' -SearchBase $domain -SearchScope 1
-     if ($AdminOUpath -eq $null) {
-        New-ADOrganizationalUnit -Name Administrators -Path "$domain"
-        $AdminOUpath = Get-ADOrganizationalUnit -Filter 'Name -like "Administrators"'
-        Write "Created $AdminOUpath"
+     $Groupspath = Get-ADOrganizationalUnit -Filter "distinguishedName -eq '$GroupDN'"
+     if ($Groupspath -eq $null) {                
+        Write "$GroupDN does not exist. Please check your entry."
+        break;
        }
-
-     $Groupspath = Get-ADOrganizationalUnit -Filter 'Name -like "Groups"' -SearchBase $AdminOUpath -SearchScope 1
-     if ($Groupspath -eq $null) {
-        New-ADOrganizationalUnit -Name Groups -Path "$AdminOUpath"
-        $Groupspath = Get-ADOrganizationalUnit -Filter 'Name -like "Groups"'
-        Write "Created $Groupspath"
-       }
-
   }
 
   process { 
@@ -117,9 +112,9 @@ Function set-ADUG-CertIssOID {
 }
 
 # Common
-set-ADUG-CertIssOID 2.16.840.1.101.3.2.1.3.13 id-fpki-common-authentication
-set-ADUG-CertIssOID 2.16.840.1.101.3.2.1.3.16 id-fpki-common-high
-set-ADUG-CertIssOID 2.16.840.1.101.3.2.1.3.40 id-fpki-common-derived-pivAuth
-set-ADUG-CertIssOID 2.16.840.1.101.3.2.1.3.41 id-fpki-common-derived-pivAuth-hardware
+set-ADUG-CertIssOID 2.16.840.1.101.3.2.1.3.13 id-fpki-common-authentication $GroupDN
+set-ADUG-CertIssOID 2.16.840.1.101.3.2.1.3.16 id-fpki-common-high $GroupDN
+set-ADUG-CertIssOID 2.16.840.1.101.3.2.1.3.40 id-fpki-common-derived-pivAuth $GroupDN
+set-ADUG-CertIssOID 2.16.840.1.101.3.2.1.3.41 id-fpki-common-derived-pivAuth-hardware $GroupDN
 
 ########################################################################
