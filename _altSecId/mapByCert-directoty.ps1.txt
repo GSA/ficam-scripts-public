@@ -1,0 +1,246 @@
+<#
+    .SYNOPSIS
+    Add or Remove AltSecID to AD based upon end-user certificates in a directory
+    .DESCRIPTION
+    Add or Remove AltSecID to AD based upon end-user certificates in a directory
+    .PARAMETER Add
+    Default Method if Not Specified Configures the Script to Add AltSecIDs into AD
+    .PARAMETER Remove
+    Mandatory instead of Add.  Configures the Script to Remove AltSecIDs in AD 
+    .PARAMETER certDir
+    The Location of your Certificates Directory.  Should contain .CER file
+    .PARAMETER unknownUser
+    The Path and Filename of your desired unknownUser text file.  Must be in TXT format.  If not supplied, will create file in running script directory
+    .PARAMETER missingAltSecID
+    The and Filename of your desired missingAltSecID CSV file.  Must be in CSV format.  If not supplied, will create file in running script directory
+    .EXAMPLE
+    mapbyCert-directoryv21.ps1 -Add -certDir C:\UserCerts -unknownUser c:\temp\unknownusers.txt -missingAltSecID c:\temp\missingaltsecid.csv
+    .EXAMPLE
+    mapbyCert-directoryv21.ps1 -Add -certDir C:\UserCerts -unknownUser c:\temp\unknownusers.txt
+    .EXAMPLE
+    mapbyCert-directoryv21.ps1 -Remove -certDir C:\UserCerts
+    .LINK
+    https://playbooks.idmanagement.gov/piv/network/account/
+    .NOTES
+    Still need to fix script optimization with hash-tables and compare features so we are not query entire domain each time we run script
+#>
+
+
+
+[CmdletBinding(DefaultParameterSetName='Add')]
+Param
+(
+    [Parameter(ParameterSetName='Add',Mandatory=$true,ValueFromPipelineByPropertyName=$true,ValueFromPipeline=$true,HelpMessage="Sets script to Add AltSecID")]
+    [Parameter(ParameterSetName='Regress',Mandatory=$true,ValueFromPipelineByPropertyName=$true,ValueFromPipeline=$true, HelpMessage="Sets script to Remove AltSecID")]
+    [Parameter(Mandatory,HelpMessage="Mandatory -- Enter Directory Path for the location of the Certificates")][ValidateScript({
+            #check if folder path is valid
+            if((Get-ChildItem $_ -Recurse -Include *.cer | Measure-Object).Count -eq 0){
+                throw "Folder Path is empty or does not contain .CER files, please enter folder path that contains certificate files"
+            }
+            return $true 
+        })][System.IO.FileInfo]$certDir,
+    [Parameter(HelpMessage="Optional -- Enter Directory and Filename for the List of Unknown Users")][ValidateScript({
+            #check if folder path is valid
+            if(-Not ([System.IO.Path]::GetDirectoryName($_) | Test-Path) ){
+                throw "Folder Path is not Valid. Please Check Input"
+            }
+            if($_ -notmatch "(\.txt)"){
+                throw "The file specified in the path argument must be either of type TXT"
+            }
+            return $true 
+        })][System.IO.FileInfo]$unknownUser,
+    [Parameter(HelpMessage="Optional -- Enter Directory and FIlename for the List of Missing AltSecID")][ValidateScript({
+            #check if folder path is valid
+            if(-Not ([System.IO.Path]::GetDirectoryName($_) | Test-Path) ){
+                throw "Folder Path is not Valid. Please Check Input"
+            }
+            if($_ -notmatch "(\.csv)"){
+                throw "The file specified in the path argument must be either of type CSV"
+            }
+            return $true 
+        })][System.IO.FileInfo]$missingAltSecID,
+    [Parameter(ParameterSetName='Add')]
+    [switch]$Add = $True,
+    [Parameter(ParameterSetName='Regress')]
+    [switch]$Remove
+)
+
+
+function CheckUserFileInputs {
+#This function checks the user file inputs, and then removes the files should they exist to prep for them to be created at a later time.
+
+    if (-Not $PSBoundParameters.ContainsKey("unknownUser"))
+    {
+        #Check if the user provided input for unknownUser, if they did, ignore, else set output file to same as script path
+        $scriptDir = Split-Path -Path $MyInvocation.MyCommand.Definition -Parent
+        $unknownUser = $scriptDir + "\unknown-user-list.txt"
+    }
+
+    if (-Not $PSBoundParameters.ContainsKey("missingAltSecID"))
+    {
+        #Check if the user provided input for unknownUser, if they did, ignore, else set output file to same as script path
+        $scriptDir = Split-Path -Path $MyInvocation.MyCommand.Definition -Parent
+        $missingAltSecID = $scriptDir + "\missing-AltSecID.csv"
+    }
+
+# Clear previous files if they do exist
+    if (Test-Path $unknownUser) 
+    {
+        Remove-Item $unknownUser
+    }
+
+    if (Test-Path $missingAltSecID) 
+    {
+        Remove-Item $missingAltSecID
+    }
+}
+
+
+
+function RemoveAltSecIDs($userAccount) {
+#This function will remove AltSecIDs from the User Account
+
+    set-aduser -identity $userAccount -Clear altsecurityidentities
+
+}
+
+function AddAltSecIDs($userAccount) {
+#This function will remove AltSecIDs from the User Account
+
+    set-aduser -identity $userAccount -Replace @{'altsecurityidentities'=$newcert}
+    echo "Added altSecurityIdentities attribute for user $userUPN."
+
+}
+
+#Main Script Process Begins Here
+
+#Import Required Powershell Modules or fail if you cannot import them
+Try{
+    Write-host "Importing modules…" –NoNewline
+    
+        Import-Module ActiveDirectory –ErrorAction Stop
+
+    Write-host "Success" –ForegroundColor Green 
+    }
+    Catch
+    {
+        Write-host "$($_.Exception.Message)" –ForegroundColor Red
+        Return
+    }
+
+
+
+#Check Users Inputs, Assign Output File Locations if Not Assigned Already
+CheckUserFileInputs
+
+# Defines location of certificates
+$certList = Get-ChildItem $certDir -Recurse -Include *.cer #Get all CER files in the directory to prevent early script failure
+
+foreach ($cert in $certList) 
+{
+
+    #Gets basic information from the certificate
+    # STEP 1: Load Certificate from file
+    $certPrint = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
+    $certPrint.Import($certDir.ToString()+"\"+$cert.Name)
+    $PIVCERT = $certPrint
+
+    # STEP 2: Extract UPN from Certificate  
+	$comOBJS = @()
+	$Extensions=$pivcert.Extensions | Where-Object {$_.Oid.FriendlyName -eq "Subject Alternative Name"}       	 
+	$comOBJS += new-object -ComObject X509Enrollment.CX509ExtensionAlternativeNames       	 
+	$UPNString=[System.Convert]::ToBase64String($Extensions.RawData)       	 
+	$comObjs[0].InitializeDecode(1, $UPNString)       	 
+	$upn = ($comOBJS[0].AlternativeNames | ?{$_.StrValue -like "*@*"}  ).strvalue
+
+    #Remove the domain from the UPN - such that it matches the logon account ID
+	$upnSplit= $upn.split('@')[0].split(',')[0]
+
+    #Check if we are removing the AltSecID
+    if ($PSBoundParameters.ContainsKey("Remove"))
+    {
+        #Desired Function is to remove the AltSecID from the UPN
+        RemoveAltSecIDs($upnsplit)
+    }
+
+    if ($PSBoundParameters.ContainsKey("Add"))
+    {
+        #Desired Function is to add the Cert to the AltSecID from the UPN
+
+        # STEP 3: Determine if UPN matches a user account
+        try {
+            Get-ADUser -Identity $upnsplit | Out-Null
+            $UserExists = $true
+        }
+
+        catch [Microsoft.ActiveDirectory.Management.ADIdentityResolutionException] {
+            "WARNING: User ""$upnSplit"" observed in ""$cert"" does not exist."
+            $UserExists = $false
+            Add-Content $unknownUser $upnSplit
+        }
+
+        if ($UserExists)
+        {
+        #Because the user does exist in AD, we need to Reverse the AltID from Cert so it is formated for AD
+        # STEP 4: Formulate Subject/Issuer String (reversed as we view it)
+		    $paths = [Regex]::Replace($PIVCERT.Issuer, ',\s*(CN=|OU=|O=|C=|DC=)', '!$1') -split "!"
+
+		    $issuer = ""
+		    # Reverse the path and save as $issuer
+			    for ($i = $paths.count -1; $i -ge 0; $i--) 
+			    {
+				    $issuer += $paths[$i]
+				    if ($i -ne 0) 
+				    {
+					    $issuer += ","
+				    }
+			    }
+
+		    $paths = [Regex]::Replace($PIVCERT.subject, ',\s*(CN=|SERIALNUMBER=|dnQualifier=|OU=|O=|C=|DC)', '!$1') -split "!"
+
+		    $subject = ""
+		    # Reverse the path and save as $subject
+			    for ($i = $paths.count -1; $i -ge 0; $i--) 
+			    {
+				    $subject += $paths[$i]
+				    if ($i -ne 0) 
+				    {
+					    $subject += ","
+				    }
+			    }
+
+		    # Get rid of the extra + sign that Microsoft adds in (not sure why)
+		    $subject = $subject.Replace("+ ", "")
+
+		    # STEP 5: Format as needed for altSecurityIdentities attribute
+		    $newcert = "X509:<I>$issuer<S>$subject"
+
+		    # OPTIONAL - PRINT A BUNCH OF DATA EXTRACTED BY SCRIPT
+		    #echo ""
+		    #echo $upn
+		    #echo $upnsplit
+		    #echo $issuer
+		    #echo $subject
+            #echo $UserExists
+		    #echo ""
+
+		    # STEP 6: Set the AD user record with the AltSecID attribute
+            AddAltSecIDs($upnSplit)
+    }
+
+
+    }
+
+}
+
+#Generate Documentation
+if ($PSBoundParameters.ContainsKey("Add"))
+{
+
+# STEP 7: Print any AD user records that do not contain an AltSecID attribute
+#this is not optimized, it queries the entire domain, need to fix, or add script action to ONLY look for missingAltSec instead of running it after every add
+echo "`nThe following users are missing an altSecurityIdentities attribute:"
+get-aduser -filter * -properties * | where {!$_.altsecurityidentities} | select-object samaccountname
+get-aduser -filter * -properties * | where {!$_.altsecurityidentities} | select-object samaccountname | export-csv $missingAltSecID
+
+}
