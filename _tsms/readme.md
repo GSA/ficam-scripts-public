@@ -1,5 +1,7 @@
 # Trust Store Management Script
 
+Last Updated: Dec 2018
+
 The Trust Store Management Script (TSMS) was designed to help update operating system trust stores to facilitate smart card logon for all potential PIV issuers across the Federal Public Key Infrastructure (FPKI). The script was designed to run using Python 3.x on Windows or macOS. 
 
 The execution of the script will vary dependent upon operating system. 
