@@ -21,7 +21,9 @@ Version:  1.0 NIPRNet
 
 # Requirements: Powershell 5.x, certreq.exe, domain joined computer or domain controller
 
-## IMPORTANT: To generate a non-exportable private key run this script in UAC ADMIN Mode PowerShell locally on the target computer/DC endpoint. It is a critical violation of Zero Trust principals to create a CSR with a Microsoft AD account SID using an exportable private key. This script may be run in non-admin mode on a domain joined computer to create an .inf for a later private key and CSR generation.
+## IMPORTANT: To generate a non-exportable private key run this script in UAC ADMIN Mode PowerShell locally on the target computer/DC endpoint. 
+It is a critical violation of Zero Trust principals to create a CSR with a Microsoft AD account SID using an exportable private key. 
+This script may be run in non-admin mode on a domain joined computer to create an .inf for a later private key and CSR generation.
 
 Run this script before promoting a candidate computer to a Domain Controller. Promote the computer to a DC after installing the certificate.
 
