@@ -1,4 +1,4 @@
-#ID-cert-request_v1-0.ps1 - 
+# ID-cert-request_v1-0.ps1 - 
 **PS Script to generate a PKCS10 certificate signing requests (CSRs) for Domain Controller or computer certificates.** 
 This automates the manual request generation steps in the DoD PKE Reference Guides for Enabling Smart Card Logon on Windows Servers.
 The typical use of the CSR is for requesting certificates from an external PKI signing CA that is trusted in the Domain of the joined Computer
@@ -19,9 +19,9 @@ Date:     October 2, 2024
 Time:     10:05 AM CDT
 Version:  1.0 NIPRNet
 
-#Requirements: Powershell 5.x, certreq.exe, domain joined computer or domain controller
+# Requirements: Powershell 5.x, certreq.exe, domain joined computer or domain controller
 
-##IMPORTANT: To generate a non-exportable private key run this script in UAC ADMIN Mode PowerShell locally on the target computer/DC endpoint. It is a critical violation of Zero Trust principals to create a CSR with a Microsoft AD account SID using an exportable private key. This script may be run in non-admin mode on a domain joined computer to create an .inf for a later private key and CSR generation.
+## IMPORTANT: To generate a non-exportable private key run this script in UAC ADMIN Mode PowerShell locally on the target computer/DC endpoint. It is a critical violation of Zero Trust principals to create a CSR with a Microsoft AD account SID using an exportable private key. This script may be run in non-admin mode on a domain joined computer to create an .inf for a later private key and CSR generation.
 
 Run this script before promoting a candidate computer to a Domain Controller. Promote the computer to a DC after installing the certificate.
 
@@ -63,13 +63,13 @@ Script Result: Output files (.req, .inf, .txt) are created in the current workin
          and <date> is the date/time the script ran in the format YYYY-MM-DD-hh-mm-ss.
 		
 
-#Script Execution: 
+# Script Execution: 
 The script should be executed in a Powershell console by changing to the directory where the script is located and 
 executing .\sid-cert-request_v1-0.ps1 or the script may be executed from a different directory using the full path to the script, 
 such as c:\sid-cert-requests\sid-cert-request_v1-0.ps1.
  
 
-#Troubleshooting: 
+# Troubleshooting: 
 If desired for troubleshooting purposes set $DebugPreference = "Continue" (Default is: "SilentlyContinue") before executing the script. 
 This causes the inf file used to generate the certificate request to not be deleted. 
 The inf file will be named using the format <common_name>_<date>.inf.
