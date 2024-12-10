@@ -39,36 +39,36 @@ https://blog.qdsecurity.se/author/carlsorqvist/
 For: Manually injecting a SID in a certificate (KB5014754)
 https://blog.qdsecurity.se/2022/05/27/manually-injecting-a-sid-in-a-certificate/
 
-User Input:
-		1. Set $ReqOU = <option> to inhibit script prompt for Organizational Unit (OU) to be used in the certificate request
-               <option> = "none"
-               <option> = "USA | USN | USAF | DISA | DHRA | etc -> OU=<input>,OU=PKI,OU=DoD,O=U.S. Government,C=US"
-               <option> = <Example:> "DC=subdomain,DC=root"
-               <option> = "" (Exit Script)
-		2. Set $ReqType = " 0 | 1 | 2 " to inhibit script prompt if local machine is not a active domain controller.
-              0 - Generate Computer certificate request
-              1 - Generate Domain Controller Certificate Reqeust
-              2 - Display all Domain Contoller information (on console and in .txt file)
-    3. Set 	$ReqTemplate = "<CertificateTemplate>"
-              Add [RequestAttributes] CertificateTemplate = "<CertificateTemplate>" to .inf
-              Include this parameter when reqeusting certificate signing from Microsoft MSCS Enterprise CA
-              $ReqTemplate = "ComputerKBR", e.g. Duplicate of the Computer template that permits CSR specfied identity
-              $ReqTemplate = "KerberosAuthenticationKBR", e.g. Duplicate of the KerberosAuthentication template that permits CSR specified identity
-              This parameter is not need for DoD NPE certificate signing.
+### User Input:
+- Set $ReqOU =
+	- <option> to inhibit script prompt for Organizational Unit (OU) to be used in the certificate request
+	- <option> = "none"
+	- <option> = "USA | USN | USAF | DISA | DHRA | etc -> OU=<input>,OU=PKI,OU=DoD,O=U.S. Government,C=US"
+	- <option> = <Example:> "DC=subdomain,DC=root"
+	- <option> = "" (Exit Script)
+- Set $ReqType = " 0 | 1 | 2 " to inhibit script prompt if local machine is not a active domain controller.
+	- 0 - Generate Computer certificate request
+	- 1 - Generate Domain Controller Certificate Reqeust
+	- 2 - Display all Domain Contoller information (on console and in .txt file)
+- Set 	$ReqTemplate = "<CertificateTemplate>"
+	- Add [RequestAttributes] CertificateTemplate = "<CertificateTemplate>" to .inf
+	- Include this parameter when reqeusting certificate signing from Microsoft MSCS Enterprise CA
+	- $ReqTemplate = "ComputerKBR", e.g. Duplicate of the Computer template that permits CSR specfied identity
+	- $ReqTemplate = "KerberosAuthenticationKBR", e.g. Duplicate of the KerberosAuthentication template that permits CSR specified identity
+	- This parameter is not need for DoD NPE certificate signing.
 
-Script Result: Output files (.req, .inf, .txt) are created in the current working directory where the script is executed from.
-		1. If run as UAC Admin new private key generation and certificate request in \\cert:\LocalMachine\REQUESTS
-    2. Output file (.req) containing PKCS10 certificate request and DC/Computer information (including SID and GUID)
-    3. Output file (.txt) details of DC/Computer information (including SID and GUID)
-    4. Output file (.inf) may be removed when private key and CSR are succesfully generated
+### Script Result: 
+Output files (.req, .inf, .txt) are created in the current working directory where the script is executed from.
+1. If run as UAC Admin new private key generation and certificate request in \\cert:\LocalMachine\REQUESTS
+2. Output file (.req) containing PKCS10 certificate request and DC/Computer information (including SID and GUID)
+3. Output file (.txt) details of DC/Computer information (including SID and GUID)
+4. Output file (.inf) may be removed when private key and CSR are succesfully generated
          The files are named <common_name>_<date>.txt where <common_name> is obtained from the local computer 
          and <date> is the date/time the script ran in the format YYYY-MM-DD-hh-mm-ss.
 		
 
 # Script Execution: 
-The script should be executed in a Powershell console by changing to the directory where the script is located and 
-executing .\sid-cert-request_v1-0.ps1 or the script may be executed from a different directory using the full path to the script, 
-such as c:\sid-cert-requests\sid-cert-request_v1-0.ps1.
+The script should be executed in a Powershell console by changing to the directory where the script is located and executing .\sid-cert-request_v1-0.ps1 or the script may be executed from a different directory using the full path to the script, such as c:\sid-cert-requests\sid-cert-request_v1-0.ps1.
  
 
 # Troubleshooting: 
