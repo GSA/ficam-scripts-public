@@ -1,0 +1,854 @@
+##
+## SID-cert-request_v1-0.ps1 - PS Script to generate a PKCS10 certificate signing requests (CSRs) for Domain Controller or computer certificates. 
+## This automates the manual request generation steps in the DoD PKE Reference Guides for Enabling Smart Card Logon on Windows Servers.
+## The typical use of the CSR is for requesting certificates from an external PKI signing CA that is trusted in the Domain of the joined Computer
+## Generated CSRs include SID extension for Strong Certificate Mapping per Microsoft KB5014754 compatible with Microsoft MSCS and DoD NPE signing CAs
+##
+##  Run this script on a domain joined computer to generate a private key and Certificate Signing Request (CSR)
+##  The CSR includes the domain joined Domain Controller or computer Microsoft proprietary SID extension for Strong Certificate Mapping, according to
+##  KB5014754: Certificate-based authentication changes on Windows domain controllers
+##  https://support.microsoft.com/en-us/topic/kb5014754-certificate-based-authentication-changes-on-windows-domain-controllers-ad2c23b0-15d8-4340-a468-4d4f3b188f16
+##
+##	Written by: Tim W. Baldridge
+##	Date:     Nov 24, 2024
+##	Time:     16:35 PM CDT
+##	Version:  1.1 NIPRNet
+##  Changelog: Updated AD Search to use domain of local computer, corrects issue with sys admin AD login from non-local domain
+##	
+##	Date:     October 2, 2024
+##	Time:     10:05 AM CDT
+##	Version:  1.0 NIPRNet
+##
+##	Requirements: Powershell 5.x, certreq.exe, domain joined computer or domain controller
+##
+##  IMPORTANT: To generate a non-exportable private key run this script in UAC ADMIN Mode PowerShell locally on the target computer/DC endpoint.
+##  It is a critical violation of Zero Trust principals to create a CSR with a Microsoft AD account SID using an exportable private key.
+##  This script may be run in non-admin mode on a domain joined computer to create an .inf for a later private key and CSR generation.
+##
+##  Run this script before promoting a candidate computer to a Domain Controller. Promote the computer to a DC after installing the certificate.
+##
+##  Script execution with UAC admin rights generates a certificate signing request with a new private key
+##  Script execution withOUT UAC admin rights generates an .inf file suitable for "certreq.exe -new" CSR generation in the current directory
+##
+##  This PowerShell script is a substantial rewrite of dc-cert-request_v1-0.ps1
+##  First published by DISA PKE Engineering - dodpke@mail.mil
+##  https://dl.cyber.mil/pki-pke/zip/dc-cert-request-v1-0.zip
+##
+##  Credit to Author: Carl S rqvist
+##  https://blog.qdsecurity.se/author/carlsorqvist/
+##  For: Manually injecting a SID in a certificate (KB5014754)
+##  https://blog.qdsecurity.se/2022/05/27/manually-injecting-a-sid-in-a-certificate/
+##
+##	User Input:
+##		1. Set $ReqOU = <option> to inhibit script prompt for Organizational Unit (OU) to be used in the certificate request
+##               <option> = "none"
+##               <option> = "USA | USN | USAF | DISA | DHRA | etc -> OU=<input>,OU=PKI,OU=DoD,O=U.S. Government,C=US"
+##               <option> = <Example:> "DC=subdomain,DC=root"
+##               <option> = "" (Exit Script)
+##
+##		2. Set $ReqType = " 0 | 1 | 2 " to inhibit script prompt if local machine is not a active domain controller.
+##              0 - Generate Computer certificate request
+##              1 - Generate Domain Controller Certificate Reqeust
+##              2 - Display all Domain Contoller information (on console and in .txt file)
+##
+##		3. Set 	$ReqTemplate = "<CertificateTemplate>"
+##              Add [RequestAttributes] CertificateTemplate = "<CertificateTemplate>" to .inf
+##              Include this parameter when reqeusting certificate signing from Microsoft MSCS Enterprise CA
+##              $ReqTemplate = "ComputerKBR", e.g. Duplicate of the Computer template that permits CSR specfied identity
+##              $ReqTemplate = "KerberosAuthenticationKBR", e.g. Duplicate of the KerberosAuthentication template that permits CSR specified identity
+##              This parameter is not need for DoD NPE certificate signing.
+##
+##
+##	Script Result: Output files (.req, .inf, .txt) are created in the current working directory where the script is executed from.
+##		1. If run as UAC Admin new private key generation and certificate request in \\cert:\LocalMachine\REQUESTS
+##      2. Output file (.req) containing PKCS10 certificate request and DC/Computer information (including SID and GUID)
+##      3. Output file (.txt) details of DC/Computer information (including SID and GUID)
+##      4. Output file (.inf) may be removed when private key and CSR are succesfully generated
+##         The files are named <common_name>_<date>.txt where <common_name> is obtained from the local computer 
+##         and <date> is the date/time the script ran in the format YYYY-MM-DD-hh-mm-ss.
+##		
+##
+##	Script Execution: The script should be executed in a Powershell console by changing to the directory where the script is located and 
+##  executing .\sid-cert-request_v1-0.ps1 or the script may be executed from a different directory using the full path to the script, 
+##  such as c:\sid-cert-requests\sid-cert-request_v1-0.ps1.
+## 
+##
+##	Troubleshooting: 
+##  If desired for troubleshooting purposes set $DebugPreference = "Continue" (Default is: "SilentlyContinue") before executing the script. 
+##  This causes the inf file used to generate the certificate request to not be deleted. 
+##  The inf file will be named using the format <common_name>_<date>.inf.
+##	
+##
+##	Note: If the local computer is not domain joined or the script is executed as a local user instead 
+##        of a domain user the script will error and exit while attempting to find the AD Computer object.
+##
+############################################################################################################
+
+#############################################
+# Sid Extension C# code here -_ using System
+#############################################
+
+$SidExtensionCode = @"
+	using System;
+	using System.ComponentModel;
+	using System.Runtime.InteropServices;
+	using System.Security.Principal;
+	using System.Text;
+	 
+	namespace Crypt
+	{
+	    public enum CertAltNameType
+	    {
+	        OtherName = 1,
+	        RFC822 = 2,
+	        DNS = 3,
+	        X400Address = 4,
+	        DirectoryName = 5,
+	        EdiPartyName = 6,
+	        URL = 7,
+	        IPAddress = 8,
+	        RegisteredId = 9
+	    }
+	 
+	    [Flags]
+	    public enum CryptEncodeFlags
+	    {
+	        CRYPT_ENCODE_ALLOC_FLAG = 0x8000,
+	        CRYPT_ENCODE_ENABLE_PUNYCODE_FLAG = 0x20000,
+	        CRYPT_UNICODE_NAME_ENCODE_DISABLE_CHECK_TYPE_FLAG = 0x40000000,
+	        CRYPT_UNICODE_NAME_ENCODE_ENABLE_T61_UNICODE_FLAG = unchecked((int)0x80000000),
+	        CRYPT_UNICODE_NAME_ENCODE_ENABLE_UTF8_UNICODE_FLAG = 0x20000000,
+	        CRYPT_UNICODE_NAME_ENCODE_FORCE_UTF8_UNICODE_FLAG = 0x10000000
+	    }
+	    [Flags]
+	    public enum CertEncodingType : int
+	    {
+	        X509 = 0x1,
+	        PKCS7 = 0x10000
+	    }
+	    [StructLayout(LayoutKind.Sequential)]
+	    public struct CRYPT_BLOB
+	    {
+	        public int cbData;
+	        public IntPtr pbData;
+	    }
+	    [StructLayout(LayoutKind.Sequential)]
+	    public struct CERT_ALT_NAME_INFO
+	    {
+	        public int cAltEntry;
+	        public IntPtr rgAltEntry;
+	    }
+	    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+	    public struct CERT_ALT_NAME_ENTRY
+	    {
+	        public CertAltNameType dwAltNameChoice;
+	        public CERT_ALT_NAME_ENTRY_UNION Value;
+	    }
+	    [StructLayout(LayoutKind.Explicit, CharSet = CharSet.Unicode)]
+	    public struct CERT_ALT_NAME_ENTRY_UNION
+	    {
+	        [FieldOffset(0)]
+	        public IntPtr pOtherName;
+	        [FieldOffset(0)]
+	        public IntPtr pwszRfc822Name;
+	        [FieldOffset(0)]
+	        public IntPtr pwszDNSName;
+	        [FieldOffset(0)]
+	        public CRYPT_BLOB DirectoryName;
+	        [FieldOffset(0)]
+	        public IntPtr pwszURL;
+	        [FieldOffset(0)]
+	        public CRYPT_BLOB IPAddress;
+	        [FieldOffset(0)]
+	        public IntPtr pszRegisteredID;
+	    }
+	    [StructLayout(LayoutKind.Sequential)]
+	    public struct CERT_OTHER_NAME
+	    {
+	        [MarshalAs(UnmanagedType.LPStr)]
+	        public String pszObjId;
+	        [MarshalAs(UnmanagedType.Struct)]
+	        public CRYPT_BLOB Value;
+	    }
+	    public static class CertSidExtension
+	    {
+	        [DllImport("Crypt32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+	        [return: MarshalAs(UnmanagedType.Bool)]
+	        public static extern bool CryptEncodeObjectEx(
+	            CertEncodingType dwCertEncodingType,
+	            [MarshalAs(UnmanagedType.LPStr)]
+	            String lpszStructType,
+	            IntPtr pvStructInfo,
+	            CryptEncodeFlags dwFlags,
+	            IntPtr pEncodePara,
+	            IntPtr pvEncoded,
+	            [MarshalAs(UnmanagedType.I4)]
+	            ref int pcbEncoded
+	        );
+	        public const string szOID_SUBJECT_ALT_NAME2 = "2.5.29.17";
+	 
+	        public static byte[] EncodeSidExtension(SecurityIdentifier sid)
+	        {
+	            if (sid == null)
+	                throw new ArgumentNullException("sid");
+	 
+	            var stringSid = sid.Value;
+	            var sidOid = "1.3.6.1.4.1.311.25.2.1";
+	            var unmanagedSidString = IntPtr.Zero;
+	            var unmanagedpOtherName = IntPtr.Zero;
+	            var unmanagedAltNameEntry = IntPtr.Zero;
+	            var unmanagedAltNameInfo = IntPtr.Zero;
+	            var outputPtr = IntPtr.Zero;
+	 
+	            try
+	            {
+	                var sidLength = stringSid.Length;
+	 
+	                // The actual SID value needs to be encoded as an X.690 OCTET_STRING. Since this is somewhat tricky to do with P/Invoke,
+	                // we just do it manually as the SID is never expected to exceed 127 characters, but verify it anyway.
+	 
+	                if (sidLength > 127)
+	                    throw new ArgumentOutOfRangeException("sid", "String representation of the provided security identifier must not exceed 127 characters.");
+	 
+	                var octetString = new byte[sidLength + 2];
+	                octetString[0] = 0x04; // Tag identifier for an OCTET_STRING
+	                octetString[1] = (byte)sidLength; // Length of the OCTET_STRING value, in bytes
+	                Array.Copy(Encoding.ASCII.GetBytes(stringSid), 0, octetString, 2, sidLength);
+	 
+	                unmanagedSidString = Marshal.AllocHGlobal(octetString.Length);
+	                Marshal.Copy(octetString, 0, unmanagedSidString, octetString.Length);
+	 
+	                var otherName = new CERT_OTHER_NAME();
+	                otherName.pszObjId = sidOid;
+	                otherName.Value = new CRYPT_BLOB();
+	                 
+	                otherName.Value.cbData = sidLength + 2;
+	                otherName.Value.pbData = unmanagedSidString;
+	                 
+	                unmanagedpOtherName = Marshal.AllocHGlobal(Marshal.SizeOf(otherName));
+	                Marshal.StructureToPtr(otherName, unmanagedpOtherName, false);
+	 
+	                var altName = new CERT_ALT_NAME_ENTRY_UNION();
+	                altName.pOtherName = unmanagedpOtherName;
+	 
+	                var altNameEntry = new CERT_ALT_NAME_ENTRY();
+	                altNameEntry.dwAltNameChoice = CertAltNameType.OtherName;
+	                altNameEntry.Value = altName;
+	 
+	                unmanagedAltNameEntry = Marshal.AllocHGlobal(Marshal.SizeOf(altNameEntry));
+	                Marshal.StructureToPtr(altNameEntry, unmanagedAltNameEntry, false);
+	 
+	                var altNames = new CERT_ALT_NAME_INFO();
+	                altNames.cAltEntry = 1;
+	                altNames.rgAltEntry = unmanagedAltNameEntry;
+	 
+	                unmanagedAltNameInfo = Marshal.AllocHGlobal(Marshal.SizeOf(altNames));
+	                Marshal.StructureToPtr(altNames, unmanagedAltNameInfo, false);
+	 
+	                int resultSize = 0;
+	                var result = CryptEncodeObjectEx(CertEncodingType.X509, szOID_SUBJECT_ALT_NAME2, unmanagedAltNameInfo, 0, IntPtr.Zero, outputPtr, ref resultSize);
+	                if (resultSize > 1)
+	                {
+	                    outputPtr = Marshal.AllocHGlobal(resultSize);
+	                    result = CryptEncodeObjectEx(CertEncodingType.X509, szOID_SUBJECT_ALT_NAME2, unmanagedAltNameInfo, 0, IntPtr.Zero, outputPtr, ref resultSize);
+	                    var output = new byte[resultSize];
+	                    Marshal.Copy(outputPtr, output, 0, resultSize);
+	                    return output;
+	                }
+	                throw new Win32Exception(Marshal.GetLastWin32Error());
+	            }
+	            finally
+	            {
+	                if (unmanagedSidString != IntPtr.Zero)
+	                {
+	                    Marshal.FreeHGlobal(unmanagedSidString);
+	                }
+	                if (unmanagedpOtherName != IntPtr.Zero)
+	                {
+	                    Marshal.FreeHGlobal(unmanagedpOtherName);
+	                }
+	                if (unmanagedAltNameEntry != IntPtr.Zero)
+	                {
+	                    Marshal.FreeHGlobal(unmanagedAltNameEntry);
+	                }
+	                if (unmanagedAltNameInfo != IntPtr.Zero)
+	                {
+	                    Marshal.FreeHGlobal(unmanagedAltNameInfo);
+	                }
+	                if (outputPtr != IntPtr.Zero)
+	                {
+	                    Marshal.FreeHGlobal(outputPtr);
+	                }
+	            }
+	        }
+	    }
+	}
+
+"@
+
+Add-Type -TypeDefinition $SidExtensionCode -Language CSharp -ReferencedAssemblies mscorlib, System.Security
+
+function get-sIDextensionBase64 ($sIDparam) 
+{
+    # Encode the SID as an .inf extension for certreq 
+    $sIDbytes = [Crypt.CertSidExtension]::EncodeSidExtension($sIDparam)
+
+    $sIDeXTbase64 = [Convert]::ToBase64String($sIDbytes)
+	 
+    return "$sIDeXTbase64"
+}
+
+function set-CertReq-KerbAuth
+{
+    param (
+        [string[]]$ReqFile, 
+        [string[]]$ReqCN, 
+        [string[]]$ReqOU, 
+        [string[]]$ReqSideXT,
+        [string[]]$ReqDNS, 
+        [string[]]$ReqDomainFQDNS, 
+        [string[]]$ReqDomainNetBIOS, 
+        [string[]]$ReqGUIDeXT
+    )
+
+write-host "`r`nGenerating Request INF File...`r`n$ReqFile" -ForegroundColor Yellow
+
+Write-Debug "`r`n$ReqFile`r`n$ReqCN`r`n$ReqOU`r`n$ReqSideXT`r`n$ReqDNS`r`n$ReqDomainFQDNS`r`n$ReqDomainNetBIOS`r`n$ReqGUIDeXT"
+
+add-content $ReqFile "[Version]
+Signature = `"`$Windows NT$`"
+
+[NewRequest]
+
+Subject = `"CN=$ReqCN$ReqOU`"
+KeySpec = 1
+KeyLength = 2048
+KeyUsage = 0xA0 ; Digital Signature, Key Encipherment
+Exportable = FALSE
+MachineKeySet = TRUE
+ProviderName = `"Microsoft RSA SChannel Cryptographic Provider`"
+ProviderType = 12
+RequestType = PKCS10
+EncryptionAlgorithm = AES
+HashAlgorithm = sha256
+KeyAlgorithm = RSA
+
+[EnhancedKeyUsageExtension]
+; MSFT Certificate Services Kerberos Authentication template EKUs
+OID=1.3.6.1.5.5.7.3.1 ; Server Authentication
+OID=1.3.6.1.5.5.7.3.2 ; Client Authentication
+OID=1.3.6.1.4.1.311.20.2.2 ; Smart Card Logon
+OID=1.3.6.1.5.2.3.5 ; KDC Authentication
+
+[Extensions]
+;Note 2.5.29.17 is the OID for a SAN extension.
+2.5.29.17 = `"{text}`"
+_continue_ = `"dns=$ReqDNS&`"`
+_continue_ = `"dns=$ReqDomainFQDNS&`"
+_continue_ = `"dns=$ReqDomainNetBIOS&`"
+_continue_ = `"GUID=$ReqGUIDeXT&`"
+
+1.3.6.1.4.1.311.25.2 = `"$ReqSideXT`"`r`n"
+
+}
+
+function set-CertReq-Computer
+{
+    param (
+        [string[]]$ReqFile, 
+        [string[]]$ReqCN, 
+        [string[]]$ReqOU, 
+        [string[]]$ReqSideXT,
+        [string[]]$ReqDNS 
+    )
+
+write-host "`r`nGenerating Request INF File...`r`n$ReqFile" -ForegroundColor Yellow
+
+Write-Debug "`r`n$ReqFile`r`n$ReqCN`r`n$ReqOU`r`n$ReqSideXT`r`n$ReqDNS"
+
+add-content $ReqFile "[Version]
+Signature = `"`$Windows NT$`"
+
+[NewRequest]
+
+Subject = `"CN=$ReqCN$ReqOU`"
+KeySpec = 1
+KeyLength = 2048
+KeyUsage = 0xA0 ; Digital Signature, Key Encipherment
+Exportable = FALSE
+MachineKeySet = TRUE
+ProviderName = `"Microsoft RSA SChannel Cryptographic Provider`"
+ProviderType = 12
+RequestType = PKCS10
+EncryptionAlgorithm = AES
+HashAlgorithm = sha256
+KeyAlgorithm = RSA
+
+[EnhancedKeyUsageExtension]
+; MSFT Certificate Services Computer template EKUs
+OID=1.3.6.1.5.5.7.3.1 ; Server Authentication
+OID=1.3.6.1.5.5.7.3.2 ; Client Authentication
+
+[Extensions]
+;Note 2.5.29.17 is the OID for a SAN extension.
+2.5.29.17 = `"{text}`"
+_continue_ = `"dns=$ReqDNS&`"`
+
+1.3.6.1.4.1.311.25.2 = `"$ReqSideXT`"`r`n"
+
+}
+	 
+#############################################
+# Main Processing
+#############################################
+
+# have the script stop if an uncaught exception occurs
+$global:ErrorActionPreference = "Stop"
+
+# get the current date and time
+$date = get-date -f yyyy-MM-dd-hh-mm-ss
+
+# Get name of current script
+$scriptName = $MyInvocation.MyCommand.Name
+
+# get current working directory
+$currDir = pwd
+
+# Get the FQDN of the system, which will be used as the default common name for the certificate request
+[string]$CN = gwmi Win32_ComputerSystem | %{$_.DNSHostName + '.' + $_.Domain}
+
+write-host "Script $scriptName execution started at $date on system $CN" -ForegroundColor Yellow
+
+#############################################
+# Determine if current user has admin rights
+#############################################
+
+try {
+       $winIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+       $winPrincipal = New-Object Security.Principal.WindowsPrincipal -ArgumentList $winIdentity
+       $winAdminResult = $winPrincipal.IsInRole( [Security.Principal.WindowsBuiltInRole]::Administrator )
+   } catch {
+       throw "Unable to determine if the current user has elevated privileges. The error was: '{0}'." -f $_
+   }
+
+if (!$winAdminResult)
+{
+	write-host "The current user does not have admin rights. No certificate request will be generated" -ForegroundColor Red
+}
+
+#############################################
+# If $ReqOU not present then Request Subject OU from user
+#############################################
+
+While (($ReqOU -eq $Null) -or !($ReqOU -match '^[\w,=]+'))
+    {
+        # Prompt OU value that will be used in the Subject DN of the certificate reqeust.
+        [string]$ReqOU = read-host "`r`nPlease enter the Organizational Unit (OU) to be used in the certificate request:`r`nUSA, USN, USAF, DISA, DHRA, etc -> Subject DN: CN=$CN,OU=<input>,OU=PKI,OU=DoD,O=U.S. Government,C=US`r`nOU=<unit>,O=<org>,C=US -> Subject DN: CN=$CN,OU=<unit>,O=<org>,C=US`r`nNONE<enter> -> Subject DN: CN=$CN`r`n<enter> -> Exit Script`r`n<input>"
+
+
+        # Now check the user's input to confirm it contains some characters.
+        # The "-match '\w+'" statement matches any letters and numbers
+        if (($ReqOU -eq $Null) -or ($ReqOU -eq ""))
+            {
+	            write-host "`r`nNo user input. Script Exiting!" -ForegroundColor Red
+    	        exit 
+            }
+  
+        elseif ($ReqOU -ieq "none")
+            {
+            # User specified none as input, Certifiate Reqeust will only specify a CN=<dnshostName>
+            $OU = ""
+            }
+
+        elseif ($ReqOU -match '^\w+')
+            {
+	            # user input is being accepted. Set OU value to the value user gave.
+                $OU = ",OU=$ReqOU,OU=PKI,OU=DoD,O=U.S. Government,C=US"
+            }
+
+        elseif ($ReqOU -match '^[\w,=]+')
+            {
+                # user specified OU 
+                $OU = ",$ReqOU"
+            }
+
+        else
+            {
+                #try again
+                Remove-Variable ReqOu
+            }
+    }
+
+Write-host "`r`nRemembering user input `"`$ReqOU=$ReqOU`"" -ForegroundColor Green
+Write-host "`r`nSubject OU for Certificate Reqeust `"CN=$CN$OU`"`r`n"
+
+
+###################################
+# Setup Output Files 
+###################################
+$RequestInfFile = ".\" + $CN + "_$date.inf"
+$RequestOutFile = ".\" + $CN + "_$date.req"
+$RequestFile    = ".\" + $CN + "_$date.txt"
+	
+write-host "`nGenerating Request File...`r`n$RequestFile" -ForegroundColor Yellow
+
+###################################
+# Determine status of local computer
+###################################
+
+write-host "`nDetermine Local Computer status..." -ForegroundColor Yellow
+
+# Check to see if this system is part of a domain. If it is not then don't attempt to find GUID and exit.
+if ((gwmi win32_computersystem).partofdomain -eq $false) 
+{
+	write-host "`nThe current system does not appear to be joined to a domain. Script will not attempt to find domain controller GUID & SID. Script exiting!" -ForegroundColor Red
+	exit
+}
+
+###################################
+# Determine status of local computer
+# This logic may not return correct results
+# If there are sub-OUs under Domain Conrollers
+###################################
+
+# Assume local computer is not a domain controller
+$DCFound=0
+
+# Setup AD directory search. This requires the user the script is executed as to be a domain user, a local user will cause script to error and stop.
+$domain = [System.DirectoryServices.ActiveDirectory.Domain]::GetComputerDomain() 
+$SearchRoot = $domain.GetDirectoryEntry() 
+$search = [System.DirectoryServices.DirectorySearcher]$Searchroot 
+
+# search will look for objectclass=rIDSet to find domain controllers. The parent entry of the results will be the domain controller DNs.
+$search.Filter = "(objectclass=rIDSet)" 
+
+# Execute search and get parent DN.
+$rIDSetResult = $search.FindAll() | ForEach-Object{ $_.GetDirectoryEntry()}| select name, parent
+
+# search will look for dNSHostName=$CN to find host computer. The parent entry of the results will be the computer DN.
+$search.Filter = "(dNSHostName=$CN)" 
+
+# Execute search and get parent DN.
+$hostNameResult = $search.FindAll() | ForEach-Object{ $_.GetDirectoryEntry()}| select name, parent
+
+###################################
+# Loop through each DN found in the rIDSetResult
+# Determine if the local Computer is among the RID collection,
+# e.g. an active Domain Controller
+###################################
+ForEach ($item In $rIDSetResult)
+    {
+	    $DCOU = $item.parent
+	    $DCEntry = New-Object System.DirectoryServices.DirectoryEntry($DCOU)
+	    $DCSearch = New-Object System.DirectoryServices.DirectorySearcher
+	    $DCSearch.SearchRoot = $DCEntry
+	    $DCSearch.Filter = "(objectclass=*)"
+	    $DCSearch.SearchScope = "base"
+	    [void]$DCSearch.PropertiesToLoad.Add("DistinguishedName")
+	    [void]$DCSearch.PropertiesToLoad.Add("CN")
+	    [void]$DCSearch.PropertiesToLoad.Add("dNSHostName")
+	    [void]$DCSearch.PropertiesToLoad.Add("objectSID")
+	    [void]$DCSearch.PropertiesToLoad.Add("objectguid")
+	    $DCResult = $DCSearch.FindAll() 
+
+	    # Loop through each item, if DNShostname from AD entry matches the CN from the cert request get GUID and display results.
+	    foreach ($DCitem in $DCResult)
+	        {
+		        $DCProp=$DCitem.properties
+		        [string[]]$DCDN = $DCProp.distinguishedname
+		        [string[]]$DCCN = $DCProp.cn
+		        [string[]]$DCDNS = $DCProp.dnshostname
+
+                [string[]]$DCSIDobj = $DCProp.objectsid
+                [byte[]]$DCSIDbytes = $DCSIDobj -split " " 
+                $DCSID = New-Object System.Security.Principal.SecurityIdentifier($DCSIDbytes, 0)
+                $DCsIDeXTbase64 = get-sIDextensionBase64 $DCSID
+                [string[]]$DCSIDstring = $DCSID.ToString()
+            
+			    [string[]]$DCGUIDobj = $DCProp.objectguid
+                [byte[]]$DCGUIDBYTES = $DCGUIDobj -split " "
+                [guid[]]$DCGUID = [guid]$DCGUIDBYTES
+			    [string[]]$DCGUIDString = $DCGUID.ToString()
+
+
+		        # Test if DNShostname matches CN from cert request.
+		        if ($DCDNS -eq $CN)
+		        {
+			        # So the DC found is the current system, Search based on DN to find the GUID.
+			        $DCFound=1
+			        # Display output and write to file
+			        # Create comments in output file
+			        "`r`n### DC Information" | out-file $RequestFile -encoding ASCII -Append
+			        write-host "`nDomain Controller: $DCCN"
+			        "`r`nDomain Controller: $DCCN" | out-file $RequestFile -encoding ASCII -Append
+			        write-host "DNS Hostname: $DCDNS"
+			        "DNS Hostname: $DCDNS" | out-file $RequestFile -encoding ASCII -Append
+			        write-host "GUID: $DCGUID"
+			        "GUID: $DCGUID" | out-file $RequestFile -encoding ASCII -Append
+                    write-host "SID: $DCSIDString"
+                    "SID: $DCSIDString" | out-file $RequestFile -encoding ASCII -Append
+                    write-host "sIDeXTbase64: $DCsIDeXTbase64"
+                    "sIDeXTbase64: $DCsIDeXTbase64" | out-file $RequestFile -encoding ASCII -Append
+			        write-host "AD DN: $DCDN`n" 
+			        "AD DN: $DCDN`n" | out-file $RequestFile -encoding ASCII -Append
+
+                    $matchStatus = $DCDNS[0] -match '^([a-zA-Z0-9-_]+)\.(([a-zA-Z0-9-_]+)\.([a-zA-Z0-9-_\.]+$))'
+                    $ReqDomainFQDNS = $matches[2]
+                    $ReqDomainNetBIOS = $matches[3].toUpper()
+
+                    # Call the function to write the Domain Controller certifiate reqeust .inf file
+                    set-CertReq-KerbAuth $RequestInfFile $CN $OU $DCsIDeXTbase64 $DCDNS $ReqDomainFQDNS $ReqDomainNetBIOS $DCGUID
+		        }		
+    	    }
+    }
+
+# Check to see if the current system was identified as a DC. If not ask user if they want to see info on all DCs.
+if ($DCFound -eq 0)
+    {
+	    # local computer is not currently a DC, Setup user prompt
+        if (($ReqType -lt 0 ) -or ($ReqType -gt 2 ))
+           {
+	        $DCtitle = "Generate Certificate Request"
+	        $DCmessage = "$CN is not currently a Domain Controller`r`nSelect Computer or Domain Controller Request or List Domain Controllers"
+
+# ReqType = 0
+	        $CompCertReq = New-Object System.Management.Automation.Host.ChoiceDescription "&Computer CertReq", `
+	        "Computer CertReq, Generate a Computer Certificate Request"
+
+# ReqType = 1
+	        $DCCertReq = New-Object System.Management.Automation.Host.ChoiceDescription "&DC CertReq", `
+	        "DC CertReq, Generate a Domain Controller Certificate Request"
+
+# ReqType = 2
+	        $DCList = New-Object System.Management.Automation.Host.ChoiceDescription "&List DCs", `
+	        "List DCs, List the domain controllers."
+
+# prompt user and save result.
+	        $DCoptions = [System.Management.Automation.Host.ChoiceDescription[]]($CompCertReq, $DCCertReq, $DCList)
+	        $DCPromptResult = $host.ui.PromptForChoice($DCtitle, $DCmessage, $DCoptions, 0) 
+            $ReqType = $DCPromptResult 
+            }
+
+        Write-host "`r`nRemembering user input `"`$ReqType=$ReqType`"`r`n0=Computer Cert, 1=DC CertReq, 2=List DCs" -ForegroundColor Green
+        
+	    # Check users input, Create Computer certificate reqeust
+	    if ($ReqType -eq 0 )
+	        {
+	            write-host "`r`nComputer CertReq selected, Create Computer certificate reqeust.`r`n"
+
+        	    $DCOU = $hostNameResult.parent
+                $DCName = $hostNameResult.name[0]
+	            $DCEntry = New-Object System.DirectoryServices.DirectoryEntry($DCOU)
+	            $DCSearch = New-Object System.DirectoryServices.DirectorySearcher
+	            $DCSearch.SearchRoot = $DCEntry
+	            $DCSearch.Filter = "(CN=$DCName)"
+	            $DCSearch.SearchScope = "OneLevel"
+	            [void]$DCSearch.PropertiesToLoad.Add("DistinguishedName")
+	            [void]$DCSearch.PropertiesToLoad.Add("CN")
+	            [void]$DCSearch.PropertiesToLoad.Add("dNSHostName")
+	            [void]$DCSearch.PropertiesToLoad.Add("objectSID")
+	            [void]$DCSearch.PropertiesToLoad.Add("objectguid")
+	            $DCResult = $DCSearch.FindAll() 
+
+			    $DCProp=$DCResult.properties
+			    $DCDN = $DCProp.distinguishedname
+			    $DCCN = $DCProp.cn
+			    $DCDNS = $DCProp.dnshostname
+
+                [string[]]$DCSIDobj = $DCProp.objectsid
+                [byte[]]$DCSIDbytes = $DCSIDobj -split " " 
+                $DCSID = New-Object System.Security.Principal.SecurityIdentifier($DCSIDbytes, 0)
+                $DCsIDeXTbase64 = get-sIDextensionBase64 $DCSID
+                [string[]]$DCSIDstring = $DCSID.ToString()
+            
+			    [string[]]$DCGUIDobj = $DCProp.objectguid
+                [byte[]]$DCGUIDBYTES = $DCGUIDobj -split " "
+                [guid[]]$DCGUID = [guid]$DCGUIDBYTES
+			    [string[]]$DCGUIDString = $DCGUID.ToString()
+	
+ 			    # Display output and write to file
+			    # Create comments in output file
+			    "`r`n### Computer Information" | out-file $RequestFile -encoding ASCII -Append
+			    write-host "`nComputer: $DCCN"
+			    "`r`nComputer: $DCCN" | out-file $RequestFile -encoding ASCII -Append
+			    write-host "DNS Hostname: $DCDNS"
+			    "DNS Hostname: $DCDNS" | out-file $RequestFile -encoding ASCII -Append
+			    write-host "GUID: $DCGUID"
+			    "GUID: $DCGUID" | out-file $RequestFile -encoding ASCII -Append
+                write-host "SID: $DCSIDString"
+                "SID: $DCSIDString" | out-file $RequestFile -encoding ASCII -Append
+                write-host "sIDeXTbase64: $DCsIDeXTbase64"
+                "sIDeXTbase64: $DCsIDeXTbase64" | out-file $RequestFile -encoding ASCII -Append
+			    write-host "AD DN: $DCDN`n" 
+			    "AD DN: $DCDN`n" | out-file $RequestFile -encoding ASCII -Append
+
+                # Call the function to write the Domain Controller certifiate reqeust .inf file
+                set-CertReq-Computer $RequestInfFile $CN $OU $DCsIDeXTbase64 $DCDNS
+            }
+  
+
+  	    # Check users input, Create Domain Controller certificate reqeust
+	    if ($ReqType -eq 1 )
+	        {
+	            write-host "`r`nDC CertReq selected, Create Domain Controller certificate reqeust.`r`n"
+
+        	    $DCOU = $hostNameResult.parent
+                $DCName = $hostNameResult.name[0]
+	            $DCEntry = New-Object System.DirectoryServices.DirectoryEntry($DCOU)
+	            $DCSearch = New-Object System.DirectoryServices.DirectorySearcher
+	            $DCSearch.SearchRoot = $DCEntry
+	            $DCSearch.Filter = "(CN=$DCName)"
+	            $DCSearch.SearchScope = "OneLevel"
+	            [void]$DCSearch.PropertiesToLoad.Add("DistinguishedName")
+	            [void]$DCSearch.PropertiesToLoad.Add("CN")
+	            [void]$DCSearch.PropertiesToLoad.Add("dNSHostName")
+	            [void]$DCSearch.PropertiesToLoad.Add("objectSID")
+	            [void]$DCSearch.PropertiesToLoad.Add("objectguid")
+	            $DCResult = $DCSearch.FindAll() 
+
+			    $DCProp=$DCResult.properties
+			    $DCDN = $DCProp.distinguishedname
+			    $DCCN = $DCProp.cn
+			    $DCDNS = $DCProp.dnshostname	
+ 
+                [string[]]$DCSIDobj = $DCProp.objectsid
+                [byte[]]$DCSIDbytes = $DCSIDobj -split " " 
+                $DCSID = New-Object System.Security.Principal.SecurityIdentifier($DCSIDbytes, 0)
+                $DCsIDeXTbase64 = get-sIDextensionBase64 $DCSID
+                [string[]]$DCSIDstring = $DCSID.ToString()
+            
+			    [string[]]$DCGUIDobj = $DCProp.objectguid
+                [byte[]]$DCGUIDBYTES = $DCGUIDobj -split " "
+                [guid[]]$DCGUID = [guid]$DCGUIDBYTES
+			    [string[]]$DCGUIDString = $DCGUID.ToString()
+ 
+			    # Display output and write to file
+			    # Create comments in output file
+			    "`r`n### DC Information" | out-file $RequestFile -encoding ASCII -Append
+			    write-host "`nDomain Controller: $DCCN"
+			    "`r`nDomain Controller: $DCCN" | out-file $RequestFile -encoding ASCII -Append
+			    write-host "DNS Hostname: $DCDNS"
+			    "DNS Hostname: $DCDNS" | out-file $RequestFile -encoding ASCII -Append
+			    write-host "GUID: $DCGUID"
+			    "GUID: $DCGUID" | out-file $RequestFile -encoding ASCII -Append
+                write-host "SID: $DCSIDString"
+                "SID: $DCSIDString" | out-file $RequestFile -encoding ASCII -Append
+                write-host "sIDeXTbase64: $DCsIDeXTbase64"
+                "sIDeXTbase64: $DCsIDeXTbase64" | out-file $RequestFile -encoding ASCII -Append
+			    write-host "AD DN: $DCDN`n" 
+			    "AD DN: $DCDN`n" | out-file $RequestFile -encoding ASCII -Append
+
+                $matchStatus = $DCDNS[0] -match '^([a-zA-Z0-9-_]+)\.(([a-zA-Z0-9-_]+)\.([a-zA-Z0-9-_\.]+$))'
+                $ReqDomainFQDNS = $matches[2]
+                $ReqDomainNetBIOS = $matches[3].toUpper()
+
+                # Call the function to write the Domain Controller certifiate reqeust .inf file
+                set-CertReq-KerbAuth $RequestInfFile $CN $OU $DCsIDeXTbase64 $DCDNS $ReqDomainFQDNS $ReqDomainNetBIOS $DCGUID
+            }
+  
+
+	    # Check users input, List DCs selected, displaying DC information
+	    if ($ReqType -eq 2 )
+	        {
+	            write-host "`r`nList DCs selected, displaying DC information.`r`n"
+    
+            # Loop through each DN found doing a new search to get the DN, CN, and dnshostname for the DC entry.
+            ForEach ($item In $rIDSetResult)
+                {
+        	        $DCOU = $item.parent
+	                $DCEntry = New-Object System.DirectoryServices.DirectoryEntry($DCOU)
+	                $DCSearch = New-Object System.DirectoryServices.DirectorySearcher
+	                $DCSearch.SearchRoot = $DCEntry
+	                $DCSearch.Filter = "(objectclass=*)"
+	                $DCSearch.SearchScope = "base"
+	                [void]$DCSearch.PropertiesToLoad.Add("DistinguishedName")
+	                [void]$DCSearch.PropertiesToLoad.Add("CN")
+	                [void]$DCSearch.PropertiesToLoad.Add("dNSHostName")
+	                [void]$DCSearch.PropertiesToLoad.Add("objectSID")
+	                [void]$DCSearch.PropertiesToLoad.Add("objectguid")
+	                $DCResult = $DCSearch.FindAll() 
+
+    		        foreach ($DCitem in $DCResult)
+	    	        {
+			            $DCProp=$DCitem.properties
+			            $DCDN = $DCProp.distinguishedname
+			            $DCCN = $DCProp.cn
+			            $DCDNS = $DCProp.dnshostname	
+
+			            [string[]]$DCSIDobj = $DCProp.objectsid
+			            [byte[]]$DCSIDbytes = $DCSIDobj -split " " 
+			            $DCSID = New-Object System.Security.Principal.SecurityIdentifier($DCSIDbytes, 0)
+			            $DCsIDeXTbase64 = get-sIDextensionBase64 $DCSID
+			            [string[]]$DCSIDstring = $DCSID.ToString()
+            
+			            [string[]]$DCGUIDobj = $DCProp.objectguid
+			            [byte[]]$DCGUIDBYTES = $DCGUIDobj -split " "
+			            [guid[]]$DCGUID = [guid]$DCGUIDBYTES
+			            [string[]]$DCGUIDString = $DCGUID.ToString()
+ 
+			            # Display output and write to file
+			            # Create comments in output file
+			            "`r`n### DC Information" | out-file $RequestFile -encoding ASCII -Append
+			            write-host "`r`nDomain Controller: $DCCN"
+			            "`r`nDomain Controller: $DCCN" | out-file $RequestFile -encoding ASCII -Append
+			            write-host "DNS Hostname: $DCDNS"
+			            "DNS Hostname: $DCDNS" | out-file $RequestFile -encoding ASCII -Append
+			            write-host "GUID: $DCGUID"
+			            "GUID: $DCGUID" | out-file $RequestFile -encoding ASCII -Append
+                        write-host "SID: $DCSIDString"
+                        "SID: $DCSIDString" | out-file $RequestFile -encoding ASCII -Append
+                        write-host "sIDeXTbase64: $DCsIDeXTbase64"
+                        "sIDeXTbase64: $DCsIDeXTbase64" | out-file $RequestFile -encoding ASCII -Append
+			            write-host "AD DN: $DCDN`n" 
+			            "AD DN: $DCDN`n" | out-file $RequestFile -encoding ASCII -Append
+		            }
+                }
+	        }
+    }
+
+
+###################################
+# Add CertificateTemplate to the .inf if specfied by user
+###################################
+if ($ReqTemplate -match '^\w+')
+{
+add-content $RequestInfFile "[RequestAttributes]
+CertificateTemplate = `"$ReqTemplate`"`r`n"
+}
+
+write-host "`r`nOutput files are written to $currDir" -ForegroundColor Yellow
+
+###################################
+# Generate Request File
+###################################
+# If in admin mode then
+# generate the cert request and then confirm there were no errors
+if ($winAdminResult)
+    {
+        write-host "`r`nAttempting Certifiate Request and Key Generation" -ForegroundColor Yellow
+
+        certreq.exe -new $RequestInfFile $RequestOutFile
+        if(($?) -or ($DebugPreference -ne "SilentlyContinue"))
+            {
+              write-host "Request Generation Complete." -ForegroundColor Yellow
+            }
+        else
+            {
+                # if there were errors remove the output files if they exist then exit.
+                remove-item .\$RequestFile -ErrorAction silentlycontinue
+                remove-item .\$RequestInfFile -ErrorAction silentlycontinue
+                write-host "`nRequest Generation Failed! Script Exiting!" -ForegroundColor Red
+                Exit 
+            }
+    }
+
+# test if $DebugPreference is SilentlyContinue and Request is sucessfully generated then remove the inf file.
+if (($DebugPreference -eq "SilentlyContinue") -and $winAdminResult)
+    {
+	    #debug argument not given to script so remove inf.
+	    $fileexists=test-path $RequestInfFile
+	    if ($fileexists -eq $True) {
+		    remove-item $RequestInfFile
+	    }
+    }
+
