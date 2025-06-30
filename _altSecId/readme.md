@@ -23,4 +23,4 @@ You will have to rename the script file and remove the .txt extension in order t
 
 You may have to change the powershell script execution policy to execute this script or sign the script to execute it after downloading.
 
-Note that the Issuer/Subject mapping in AD after September 2024 will require a policy tuple registry edit to be supported.  This policy tuple prevents certificate name spoofing vulnerabilities by defining acceptable issuing CAs, acceptable certificate policy OIDs, and defining the IssuerSubject mapping as acceptable.  It is recommended to use stronger identifier for account mapping like Subject Key Identifier (x509:'<SKI>').
+Note that the Issuer/Subject mapping in AD after September 2024 will require a policy tuple registry edit to be supported.  This policy tuple prevents certificate name spoofing vulnerabilities by defining acceptable issuing CAs, acceptable certificate policy OIDs, and defining the IssuerSubject mapping as acceptable.  It is recommended to use stronger identifier for account mapping like Subject Key Identifier (x509:"<SKI>").
