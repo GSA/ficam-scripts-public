@@ -1,6 +1,6 @@
 # Autopopulate altSecurityIdentities (IssuerSubject)
 
-mapByCert-directoty.ps1.txt is a PowerShell script that imports a PIV authentication certificate information into Microsoft Active Directory, specifically the Issuer/Subject DN mapping. As a network administrator for a Federal Government agency, you can use this script to automate Microsoft Windows Active Directory (AD) user information to enable altSecurityIdentity account linking as described in [https://playbooks.idmanagement.gov/piv/network/account/](https://www.idmanagement.gov/implement/scl-windows/)
+mapByCert-directoty.ps1.txt is a PowerShell script that imports a PIV authentication certificate information into Microsoft Active Directory, specifically the Issuer/Subject DN mapping. As a network administrator for a Federal Government agency, you can use this script to automate Microsoft Windows Active Directory (AD) user information to enable altSecurityIdentity account linking as described in [https://idmanagement.gov/implement/scl-windows/](https://www.idmanagement.gov/implement/scl-windows/)
 
 This script was developed through collaboration with a number of U.S. Federal Agencies. If you have questions about the script or developing it further, please contact icam at gsa.gov.
 
